@@ -84,7 +84,7 @@ async def scrape_all_products_async(url: str, debug: bool = False):
     print(f"STEP 2: Scraping product pages (ASYNC)")
     print(f"{'='*60}\n")
     print(f"⚡ Scraping {len(all_products)} products with 15 concurrent connections...")
-    print(f"This will be ~15x faster than regular scraping!\n")
+    print(f"This will be ~5x faster than regular scraping!\n")
     
     products_with_text = await scrape_products_batch(all_products, debug)
     
@@ -95,8 +95,8 @@ async def scrape_products_batch(products: List[Dict], debug: bool = False):
     """
     Scrape multiple products concurrently using async
     """
-    connector = aiohttp.TCPConnector(limit=15)  # 15 concurrent connections
-    timeout = aiohttp.ClientTimeout(total=30)
+    connector = aiohttp.TCPConnector(limit=5, force_close=False, ttl_dns_cache=300)  # 10 concurrent connections
+    timeout = aiohttp.ClientTimeout(total=60, connect=30)
     
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         tasks = []
@@ -127,71 +127,89 @@ async def scrape_single_product(session: aiohttp.ClientSession, product: Dict,
         'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://luxury.tatacliq.com/'
     }
-    
-    try:
-        async with session.get(product_url, headers=headers) as response:
-            if response.status != 200:
-                print(f"❌ {index}/{total}: {mp_code} - Failed (status {response.status})")
-                return None
-            
-            html = await response.text()
-            
-            # Parse HTML
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            searchable_parts = []
-            
-            # Extract content
-            searchable_parts.append(product['title'])
-            searchable_parts.append(product['brand'])
-            
-            # Meta tags
-            meta_desc = soup.find('meta', {'name': 'description'})
-            if meta_desc and meta_desc.get('content'):
-                searchable_parts.append(meta_desc['content'])
-            
-            meta_keywords = soup.find('meta', {'name': 'keywords'})
-            if meta_keywords and meta_keywords.get('content'):
-                searchable_parts.append(meta_keywords['content'])
-            
-            # Product sections only (exclude recommendations)
-            product_sections = soup.find_all(['h1', 'h2', 'h3', 'p', 'div'], 
-                                             class_=re.compile(r'product|description|detail|feature|special', re.IGNORECASE))
-            
-            for section in product_sections:
-                section_str = str(section.get('class', [])) + str(section.get('id', ''))
-                if any(word in section_str.lower() for word in ['similar', 'viewed', 'recommend', 'related', 'carousel']):
-                    continue
-                
-                text = section.get_text(separator=' ', strip=True)
-                searchable_parts.append(text)
-            
-            searchable_text = ' '.join(str(p) for p in searchable_parts if p).lower()
-            
-            # Progress indicator (every 50 products)
-            if index % 50 == 0:
-                print(f"✓ Progress: {index}/{total} products scraped ({index/total*100:.1f}%)")
-            
-            if show_debug:
-                print(f"\n{'='*60}")
-                print(f"DEBUG Product {index}")
-                print(f"MP Code: {mp_code}")
-                print(f"URL: {product_url}")
-                print(f"Searchable text length: {len(searchable_text)} chars")
-                print(f"First 500 chars: {searchable_text[:500]}")
-                print(f"{'='*60}\n")
-            
-            return {
-                'mp_code': mp_code,
-                'searchable_text': searchable_text,
-                'title': product['title'],
-                'brand': product['brand']
-            }
-            
-    except Exception as e:
-        print(f"❌ {index}/{total}: {mp_code} - Error: {str(e)[:40]}")
-        return None
 
+    await asyncio.sleep(0.3)  # 300ms delay
+
+    # Retry logic - try up to 3 times
+    for attempt in range(3):
+        try:
+            await asyncio.sleep(0.2 * attempt)  # Increasing backoff: 0s, 0.2s, 0.4s
+
+            async with session.get(product_url, headers=headers) as response:
+                if response.status != 200:
+                    if attempt < 2:  # Try again
+                        continue
+                    print(f"❌ {index}/{total}: {mp_code} - Failed (status {response.status})")
+                    return None
+
+                html = await response.text()
+
+                # Parse HTML
+                soup = BeautifulSoup(html, 'html.parser')
+
+                searchable_parts = []
+
+                # Extract content
+                searchable_parts.append(product['title'])
+                searchable_parts.append(product['brand'])
+
+                # Meta tags
+                meta_desc = soup.find('meta', {'name': 'description'})
+                if meta_desc and meta_desc.get('content'):
+                    searchable_parts.append(meta_desc['content'])
+
+                meta_keywords = soup.find('meta', {'name': 'keywords'})
+                if meta_keywords and meta_keywords.get('content'):
+                    searchable_parts.append(meta_keywords['content'])
+
+                # Product sections only (exclude recommendations)
+                product_sections = soup.find_all(['h1', 'h2', 'h3', 'p', 'div'],
+                                                 class_=re.compile(r'product|description|detail|feature|special', re.IGNORECASE))
+
+                for section in product_sections:
+                    section_str = str(section.get('class', [])) + str(section.get('id', ''))
+                    if any(word in section_str.lower() for word in ['similar', 'viewed', 'recommend', 'related', 'carousel']):
+                        continue
+
+                    text = section.get_text(separator=' ', strip=True)
+                    searchable_parts.append(text)
+
+                searchable_text = ' '.join(str(p) for p in searchable_parts if p).lower()
+
+                # Progress indicator (every 100 products)
+                if index % 100 == 0:
+                    print(f"✓ Progress: {index}/{total} products scraped ({index/total*100:.1f}%)")
+
+                if show_debug:
+                    print(f"\n{'='*60}")
+                    print(f"DEBUG Product {index}")
+                    print(f"MP Code: {mp_code}")
+                    print(f"URL: {product_url}")
+                    print(f"Searchable text length: {len(searchable_text)} chars")
+                    print(f"First 500 chars: {searchable_text[:500]}")
+                    print(f"{'='*60}\n")
+
+                return {
+                    'mp_code': mp_code,
+                    'searchable_text': searchable_text,
+                    'title': product['title'],
+                    'brand': product['brand']
+                }
+
+        except asyncio.TimeoutError:
+            if attempt < 2:
+                await asyncio.sleep(1)  # Wait 1 second before retry
+                continue
+            print(f"❌ {index}/{total}: {mp_code} - Timeout after 3 attempts")
+            return None
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(1)
+                continue
+            print(f"❌ {index}/{total}: {mp_code} - Error: {str(e)[:50]}")
+            return None
+
+    return None  # All retries failed
 
 def filter_by_keywords(products_data: List[Dict], keywords: List[str]) -> List[str]:
     """
